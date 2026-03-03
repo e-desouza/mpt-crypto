@@ -13,6 +13,7 @@ static void test_homomorphic_operations(const secp256k1_context *ctx);
 static void test_zero_encryption(const secp256k1_context *ctx);
 static void test_canonical_zero(const secp256k1_context *ctx);
 static void test_verify_encryption(const secp256k1_context *ctx);
+static void test_bsgs_edge_cases(const secp256k1_context *ctx);
 
 // Main test runner
 int main()
@@ -32,6 +33,10 @@ int main()
   test_zero_encryption(ctx);
   test_canonical_zero(ctx);
   test_verify_encryption(ctx);
+  test_bsgs_edge_cases(ctx);
+
+  /* Cleanup BSGS table */
+  secp256k1_elgamal_bsgs_free();
 
   secp256k1_context_destroy(ctx);
   printf("ALL TESTS PASSED\n");
@@ -207,6 +212,72 @@ static void test_verify_encryption(const secp256k1_context *ctx)
   c2 = c1; // Force a mismatch
   EXPECT(secp256k1_elgamal_verify_encryption(
              ctx, &c1, &c2, &pubkey, zero_amount, blinding_factor) == 0);
+
+  printf("Test passed!\n");
+}
+
+/**
+ * @brief Test BSGS edge cases for constant-time decryption.
+ *
+ * Tests boundary values and edge cases:
+ * - amount = 0 (special case, handled before table lookup)
+ * - amount = 1 (first non-zero value)
+ * - amount = 1023 (last value in first baby-step range)
+ * - amount = 1024 (BSGS_BABY_STEP_SIZE, first value requiring giant step)
+ * - amount = 1025 (second value requiring giant step)
+ * - amount = 999999 (large value near max)
+ * - amount = 1000000 (MAX_DECRYPT_VALUE)
+ */
+static void test_bsgs_edge_cases(const secp256k1_context *ctx)
+{
+  unsigned char privkey[32], blinding_factor[32];
+  secp256k1_pubkey pubkey, c1, c2, temp_pubkey;
+  uint64_t decrypted_amount;
+
+  /* Edge case amounts to test */
+  uint64_t test_amounts[] = {
+      0,       /* Zero (special case) */
+      1,       /* First non-zero */
+      1023,    /* Last baby-step in first range (BSGS_BABY_STEP_SIZE - 1) */
+      1024,    /* BSGS_BABY_STEP_SIZE boundary */
+      1025,    /* First after boundary */
+      2047,    /* End of second baby-step range */
+      2048,    /* Two giant steps */
+      10000,   /* Medium value */
+      100000,  /* Large value */
+      999999,  /* Near max */
+      1000000, /* MAX_DECRYPT_VALUE */
+  };
+  size_t num_tests = sizeof(test_amounts) / sizeof(test_amounts[0]);
+
+  printf("Running test: BSGS edge cases (%zu values)...\n", num_tests);
+
+  /* Initialize BSGS table explicitly */
+  EXPECT(secp256k1_elgamal_bsgs_init(ctx) == 1);
+
+  /* Generate keypair once */
+  EXPECT(secp256k1_elgamal_generate_keypair(ctx, privkey, &pubkey) == 1);
+
+  for (size_t i = 0; i < num_tests; i++)
+  {
+    uint64_t amount = test_amounts[i];
+
+    /* Generate new blinding factor for each test */
+    EXPECT(secp256k1_elgamal_generate_keypair(ctx, blinding_factor,
+                                              &temp_pubkey) == 1);
+
+    /* Encrypt */
+    EXPECT(secp256k1_elgamal_encrypt(ctx, &c1, &c2, &pubkey, amount,
+                                     blinding_factor) == 1);
+
+    /* Decrypt */
+    decrypted_amount = UINT64_MAX; /* Initialize to invalid value */
+    EXPECT(secp256k1_elgamal_decrypt(ctx, &decrypted_amount, &c1, &c2,
+                                     privkey) == 1);
+
+    /* Verify */
+    EXPECT(decrypted_amount == amount);
+  }
 
   printf("Test passed!\n");
 }

@@ -163,6 +163,18 @@ int main(void)
   uint64_t v5[] = {0, 0};
   run_test_case(ctx, "Aggregated Proof (0, 0)", v5, 2, 1);
 
+  /* 6. Aggregated proof, 4 values */
+  uint64_t v6[] = {100, 200, 300, 400};
+  run_test_case(ctx, "Aggregated Proof (4 values)", v6, 4, 0);
+
+  /* 7. Aggregated proof, 8 values */
+  uint64_t v7[] = {1, 2, 3, 4, 5, 6, 7, 8};
+  run_test_case(ctx, "Aggregated Proof (8 values)", v7, 8, 0);
+
+  /* 8. Aggregated proof with mixed values including MAX */
+  uint64_t v8[] = {0, 0xFFFFFFFFFFFFFFFF, 12345, 0};
+  run_test_case(ctx, "Aggregated Proof (mixed with MAX)", v8, 4, 0);
+
   secp256k1_context_destroy(ctx);
   printf("\n[TEST] All Bulletproof tests completed successfully\n");
   return 0;

@@ -125,11 +125,129 @@ void test_pedersen_homomorphic_property()
   secp256k1_context_destroy(ctx);
 }
 
+void test_generator_cache()
+{
+  secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN |
+                                                    SECP256K1_CONTEXT_VERIFY);
+
+  printf("DEBUG: Starting Generator Cache tests...\n");
+
+  /* Test cached G vector */
+  const secp256k1_pubkey *G_vec_64 = secp256k1_mpt_get_cached_G_vec(ctx, 64);
+  EXPECT(G_vec_64 != NULL);
+
+  /* Second call should return same pointer (cached) */
+  const secp256k1_pubkey *G_vec_64_again = secp256k1_mpt_get_cached_G_vec(ctx, 64);
+  EXPECT(G_vec_64_again == G_vec_64);
+  printf("SUCCESS: G vector cache returns same pointer.\n");
+
+  /* Test cached H vector */
+  const secp256k1_pubkey *H_vec_64 = secp256k1_mpt_get_cached_H_vec(ctx, 64);
+  EXPECT(H_vec_64 != NULL);
+
+  const secp256k1_pubkey *H_vec_64_again = secp256k1_mpt_get_cached_H_vec(ctx, 64);
+  EXPECT(H_vec_64_again == H_vec_64);
+  printf("SUCCESS: H vector cache returns same pointer.\n");
+
+  /* Test cached h generator */
+  secp256k1_pubkey h_gen, h_gen_again;
+  EXPECT(secp256k1_mpt_get_cached_h_generator(ctx, &h_gen) == 1);
+  EXPECT(secp256k1_mpt_get_cached_h_generator(ctx, &h_gen_again) == 1);
+
+  /* Both calls should return the same generator value */
+  unsigned char ser1[33], ser2[33];
+  size_t len1 = 33, len2 = 33;
+  secp256k1_ec_pubkey_serialize(ctx, ser1, &len1, &h_gen, SECP256K1_EC_COMPRESSED);
+  secp256k1_ec_pubkey_serialize(ctx, ser2, &len2, &h_gen_again, SECP256K1_EC_COMPRESSED);
+  EXPECT(memcmp(ser1, ser2, 33) == 0);
+  printf("SUCCESS: h generator cache returns consistent value.\n");
+
+  /* Test larger sizes */
+  const secp256k1_pubkey *G_vec_128 = secp256k1_mpt_get_cached_G_vec(ctx, 128);
+  EXPECT(G_vec_128 != NULL);
+
+  const secp256k1_pubkey *H_vec_256 = secp256k1_mpt_get_cached_H_vec(ctx, 256);
+  EXPECT(H_vec_256 != NULL);
+  printf("SUCCESS: Larger generator vectors cached.\n");
+
+  /* Free cache */
+  secp256k1_mpt_free_generator_cache();
+  printf("SUCCESS: Generator cache freed.\n");
+
+  secp256k1_context_destroy(ctx);
+}
+
+void test_batch_scalar_inversion()
+{
+  printf("DEBUG: Starting Batch Scalar Inversion tests...\n");
+
+  secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN |
+                                                    SECP256K1_CONTEXT_VERIFY);
+
+  /* Test with n=8 scalars */
+  size_t n = 8;
+  unsigned char scalars[8 * 32];
+  unsigned char inverses_batch[8 * 32];
+  unsigned char inverses_individual[8 * 32];
+
+  /* Generate random scalars */
+  for (size_t i = 0; i < n; i++) {
+    random_scalar(ctx, scalars + i * 32);
+  }
+
+  /* Compute batch inverses */
+  int ok = secp256k1_mpt_scalar_batch_inverse(inverses_batch, scalars, n);
+  EXPECT(ok == 1);
+
+  /* Compute individual inverses for comparison */
+  for (size_t i = 0; i < n; i++) {
+    secp256k1_mpt_scalar_inverse(inverses_individual + i * 32, scalars + i * 32);
+  }
+
+  /* Verify they match */
+  for (size_t i = 0; i < n; i++) {
+    EXPECT(memcmp(inverses_batch + i * 32, inverses_individual + i * 32, 32) == 0);
+  }
+  printf("SUCCESS: Batch inversion matches individual inversion (n=8).\n");
+
+  /* Test with larger n */
+  size_t n_large = 64;
+  unsigned char *scalars_large = malloc(n_large * 32);
+  unsigned char *inverses_large = malloc(n_large * 32);
+  unsigned char *verify = malloc(n_large * 32);
+
+  for (size_t i = 0; i < n_large; i++) {
+    random_scalar(ctx, scalars_large + i * 32);
+  }
+
+  ok = secp256k1_mpt_scalar_batch_inverse(inverses_large, scalars_large, n_large);
+  EXPECT(ok == 1);
+
+  /* Verify: scalar * inverse should equal 1 */
+  for (size_t i = 0; i < n_large; i++) {
+    secp256k1_mpt_scalar_mul(verify + i * 32,
+                              scalars_large + i * 32,
+                              inverses_large + i * 32);
+    /* Check result is 1 (big-endian: 0x00...01) */
+    unsigned char one[32] = {0};
+    one[31] = 1;
+    EXPECT(memcmp(verify + i * 32, one, 32) == 0);
+  }
+  printf("SUCCESS: Batch inversion verified (n=64): a * a^-1 = 1.\n");
+
+  free(scalars_large);
+  free(inverses_large);
+  free(verify);
+  secp256k1_context_destroy(ctx);
+}
+
 int main()
 {
   test_pedersen_commitment_basic();
   test_pedersen_zero_value();
   test_pedersen_homomorphic_property();
+  test_generator_cache();
+  test_batch_scalar_inversion();
   printf("DEBUG: All Pedersen Commitment tests passed!\n");
   return 0;
 }
