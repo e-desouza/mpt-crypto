@@ -113,3 +113,93 @@ void secp256k1_mpt_scalar_reduce32(unsigned char out32[32],
   /* SECURE CLEANUP */
   OPENSSL_cleanse(&s, sizeof(s));
 }
+
+/**
+ * @brief Batch inversion using Montgomery's trick.
+ *
+ * Computes the multiplicative inverse of n scalars using only 1 inversion
+ * and 3*(n-1) multiplications, instead of n inversions.
+ *
+ * Algorithm:
+ * 1. Compute prefix products: p[i] = in[0] * in[1] * ... * in[i]
+ * 2. Invert the final product: inv_all = p[n-1]^{-1}
+ * 3. Compute inverses in reverse: out[i] = inv_all * p[i-1], then update
+ *    inv_all *= in[i]
+ *
+ * @param out    Output array of n 32-byte inverse scalars
+ * @param in     Input array of n 32-byte scalars (must be non-zero)
+ * @param n      Number of scalars to invert
+ * @return 1 on success, 0 on failure (if any input is zero)
+ */
+int secp256k1_mpt_scalar_batch_inverse(unsigned char *out,
+                                       const unsigned char *in, size_t n)
+{
+  if (n == 0)
+    return 1;
+
+  if (n == 1)
+  {
+    secp256k1_mpt_scalar_inverse(out, in);
+    return 1;
+  }
+
+  /* Allocate prefix products */
+  secp256k1_scalar *s_prefix =
+      (secp256k1_scalar *)malloc(n * sizeof(secp256k1_scalar));
+  secp256k1_scalar *s_in =
+      (secp256k1_scalar *)malloc(n * sizeof(secp256k1_scalar));
+  if (!s_prefix || !s_in)
+  {
+    free(s_prefix);
+    free(s_in);
+    return 0;
+  }
+
+  int ok = 0;
+  secp256k1_scalar inv_all, tmp;
+
+  /* Parse all inputs and check for zeros */
+  for (size_t i = 0; i < n; i++)
+  {
+    int overflow;
+    secp256k1_scalar_set_b32(&s_in[i], in + i * 32, &overflow);
+    if (secp256k1_scalar_is_zero(&s_in[i]))
+      goto cleanup; /* Zero input - cannot invert */
+  }
+
+  /* Step 1: Compute prefix products */
+  s_prefix[0] = s_in[0];
+  for (size_t i = 1; i < n; i++)
+  {
+    secp256k1_scalar_mul(&s_prefix[i], &s_prefix[i - 1], &s_in[i]);
+  }
+
+  /* Step 2: Invert the final product */
+  secp256k1_scalar_inverse(&inv_all, &s_prefix[n - 1]);
+
+  /* Step 3: Compute individual inverses in reverse */
+  for (size_t i = n - 1; i > 0; i--)
+  {
+    /* out[i] = inv_all * prefix[i-1] */
+    secp256k1_scalar_mul(&tmp, &inv_all, &s_prefix[i - 1]);
+    secp256k1_scalar_get_b32(out + i * 32, &tmp);
+
+    /* inv_all = inv_all * in[i] */
+    secp256k1_scalar_mul(&inv_all, &inv_all, &s_in[i]);
+  }
+
+  /* out[0] = inv_all (which is now in[0]^{-1}) */
+  secp256k1_scalar_get_b32(out, &inv_all);
+
+  ok = 1;
+
+cleanup:
+  /* SECURE CLEANUP */
+  OPENSSL_cleanse(s_prefix, n * sizeof(secp256k1_scalar));
+  OPENSSL_cleanse(s_in, n * sizeof(secp256k1_scalar));
+  OPENSSL_cleanse(&inv_all, sizeof(inv_all));
+  OPENSSL_cleanse(&tmp, sizeof(tmp));
+  free(s_prefix);
+  free(s_in);
+  return ok;
+}
