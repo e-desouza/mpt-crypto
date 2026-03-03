@@ -41,6 +41,34 @@ secp256k1_elgamal_decrypt(
     unsigned char const* privkey);
 
 /**
+ * @brief Initializes the BSGS lookup table for constant-time decryption.
+ *
+ * This function precomputes the Baby-Step Giant-Step table used by
+ * secp256k1_elgamal_decrypt(). Call this once during application
+ * initialization for optimal decryption performance.
+ *
+ * Memory usage: ~80KB for MAX_AMOUNT = 1,000,000
+ *
+ * @note This function is automatically called on first decryption if not
+ *       initialized, but explicit initialization avoids the first-call penalty.
+ * @note NOT thread-safe. Call during single-threaded initialization phase.
+ *
+ * @param ctx  secp256k1 context
+ * @return 1 on success, 0 on failure
+ */
+SECP256K1_API int
+secp256k1_elgamal_bsgs_init(secp256k1_context const* ctx);
+
+/**
+ * @brief Frees the BSGS lookup table memory.
+ *
+ * Call this during application shutdown to release the ~80KB of memory
+ * used by the BSGS table.
+ */
+SECP256K1_API void
+secp256k1_elgamal_bsgs_free(void);
+
+/**
  * @brief Homomorphically adds two ElGamal ciphertexts.
  */
 SECP256K1_API int
@@ -222,6 +250,37 @@ secp256k1_mpt_verify_same_plaintext(
     unsigned char const* tx_context_id);
 
 /**
+ * @brief Batch verify multiple same-plaintext proofs.
+ *
+ * This is faster than individual verification when verifying multiple proofs.
+ * Uses batch verification technique from BIP-340 for ~3x speedup on 4+ proofs.
+ *
+ * @param ctx               secp256k1 context
+ * @param proofs            Array of proof pointers (each 261 bytes)
+ * @param n_proofs          Number of proofs to verify
+ * @param R1_array          Array of R1 point pointers
+ * @param S1_array          Array of S1 point pointers
+ * @param P1_array          Array of P1 public key pointers
+ * @param R2_array          Array of R2 point pointers
+ * @param S2_array          Array of S2 point pointers
+ * @param P2_array          Array of P2 public key pointers
+ * @param tx_context_ids    Array of context ID pointers (or NULL for all)
+ * @return 1 if ALL proofs are valid, 0 if any proof is invalid
+ */
+SECP256K1_API int
+secp256k1_mpt_batch_verify_same_plaintext(
+    secp256k1_context const* ctx,
+    unsigned char const* const* proofs,
+    size_t n_proofs,
+    secp256k1_pubkey const* const* R1_array,
+    secp256k1_pubkey const* const* S1_array,
+    secp256k1_pubkey const* const* P1_array,
+    secp256k1_pubkey const* const* R2_array,
+    secp256k1_pubkey const* const* S2_array,
+    secp256k1_pubkey const* const* P2_array,
+    unsigned char const* const* tx_context_ids);
+
+/**
  * @brief Calculates the expected proof size for a given number of ciphertexts.
  */
 SECP256K1_API size_t
@@ -269,6 +328,47 @@ secp256k1_mpt_verify_same_plaintext_multi(
     secp256k1_pubkey const* S_array,
     secp256k1_pubkey const* Pk_array,
     unsigned char const* tx_context_id);
+
+/*
+================================================================================
+|                                                                              |
+|           GENERATOR CACHE (for Bulletproof optimization)                     |
+================================================================================
+*/
+
+/**
+ * @brief Get cached G vector generators for Bulletproofs.
+ *
+ * Returns a pointer to pre-computed generators. This avoids repeated
+ * NUMS point derivation during proof generation/verification.
+ * The cache is automatically expanded as needed.
+ *
+ * @param ctx    secp256k1 context
+ * @param n      Number of generators needed
+ * @return Pointer to cached G_vec (do not free) or NULL on failure
+ */
+SECP256K1_API const secp256k1_pubkey*
+secp256k1_mpt_get_cached_G_vec(secp256k1_context const* ctx, size_t n);
+
+/**
+ * @brief Get cached H vector generators for Bulletproofs.
+ */
+SECP256K1_API const secp256k1_pubkey*
+secp256k1_mpt_get_cached_H_vec(secp256k1_context const* ctx, size_t n);
+
+/**
+ * @brief Get the cached single H generator (for Pedersen commitments).
+ */
+SECP256K1_API int
+secp256k1_mpt_get_cached_h_generator(secp256k1_context const* ctx, secp256k1_pubkey* h);
+
+/**
+ * @brief Free all cached generators.
+ *
+ * Call this during application shutdown to release memory.
+ */
+SECP256K1_API void
+secp256k1_mpt_free_generator_cache(void);
 
 /**
  * @brief Computes a Pedersen Commitment: C = value*G + blinding_factor*Pk_base.
@@ -424,6 +524,20 @@ void
 secp256k1_mpt_scalar_reduce32(unsigned char out32[32], unsigned char const in32[32]);
 
 /**
+ * @brief Batch inversion using Montgomery's trick.
+ *
+ * Computes the multiplicative inverse of n scalars using only 1 inversion
+ * and 3*(n-1) multiplications, providing significant speedup for n > 2.
+ *
+ * @param out    Output array of n 32-byte inverse scalars
+ * @param in     Input array of n 32-byte scalars (must be non-zero)
+ * @param n      Number of scalars to invert
+ * @return 1 on success, 0 on failure (if any input is zero)
+ */
+int
+secp256k1_mpt_scalar_batch_inverse(unsigned char* out, unsigned char const* in, size_t n);
+
+/**
  * Returns the size of the serialized proof for N recipients.
  * Size: (1 + N) * 33 bytes for points + 2 * 32 bytes for scalars.
  */
@@ -480,6 +594,24 @@ secp256k1_bulletproof_verify_agg(
     size_t m,
     secp256k1_pubkey const* pk_base,
     unsigned char const* context_id);
+
+/**
+ * Compute multi-scalar multiplication (MSM): r_out = sum_i(scalars[i] * points[i])
+ *
+ * @param[in]   ctx       secp256k1 context
+ * @param[out]  r_out     The resulting point
+ * @param[in]   points    Array of n points
+ * @param[in]   scalars   Flat array of n 32-byte scalars
+ * @param[in]   n         Number of (scalar, point) pairs
+ *
+ * @return 1 on success, 0 on failure (all scalars zero or invalid input).
+ */
+int secp256k1_bulletproof_ipa_msm(
+    secp256k1_context const* ctx,
+    secp256k1_pubkey* r_out,
+    secp256k1_pubkey const* points,
+    unsigned char const* scalars,
+    size_t n);
 
 #ifdef __cplusplus
 }
