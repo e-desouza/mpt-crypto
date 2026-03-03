@@ -30,7 +30,163 @@
 #include "secp256k1_mpt.h"
 #include <openssl/crypto.h> // For OPENSSL_cleanse
 #include <openssl/sha.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* --- Generator Cache for Bulletproofs Optimization --- */
+
+/**
+ * Maximum number of generators to cache per vector (G and H).
+ * For 64*m aggregation with m up to 16, we need 1024 generators.
+ * Adjust as needed for your use case.
+ */
+#define MPT_GEN_CACHE_MAX_SIZE 1024
+
+typedef struct
+{
+  secp256k1_pubkey *G_vec;
+  secp256k1_pubkey *H_vec;
+  secp256k1_pubkey H_single; /* The standard H for Pedersen commitments */
+  size_t G_cached;
+  size_t H_cached;
+  int H_single_valid;
+  int initialized;
+} mpt_generator_cache_t;
+
+/* Global generator cache (lazy-initialized, thread-safe reads after init) */
+static mpt_generator_cache_t g_gen_cache = {
+    .G_vec = NULL,
+    .H_vec = NULL,
+    .G_cached = 0,
+    .H_cached = 0,
+    .H_single_valid = 0,
+    .initialized = 0};
+
+/**
+ * @brief Initialize or expand the generator cache.
+ *
+ * This ensures at least `n` generators are cached for both G and H vectors.
+ * Thread-safety: This function is NOT thread-safe; call during initialization.
+ *
+ * @param ctx    secp256k1 context
+ * @param n      Minimum number of generators needed
+ * @return 1 on success, 0 on failure
+ */
+static int ensure_generator_cache(const secp256k1_context *ctx, size_t n)
+{
+  if (n > MPT_GEN_CACHE_MAX_SIZE)
+    return 0; /* Exceeds max cache size */
+
+  /* Cache the single H generator if not done */
+  if (!g_gen_cache.H_single_valid)
+  {
+    if (!secp256k1_mpt_hash_to_point_nums(ctx, &g_gen_cache.H_single,
+                                          (const unsigned char *)"H", 1, 0))
+      return 0;
+    g_gen_cache.H_single_valid = 1;
+  }
+
+  /* Expand G vector if needed */
+  if (g_gen_cache.G_cached < n)
+  {
+    secp256k1_pubkey *new_G = (secp256k1_pubkey *)realloc(
+        g_gen_cache.G_vec, n * sizeof(secp256k1_pubkey));
+    if (!new_G)
+      return 0;
+    g_gen_cache.G_vec = new_G;
+
+    for (size_t i = g_gen_cache.G_cached; i < n; i++)
+    {
+      if (!secp256k1_mpt_hash_to_point_nums(ctx, &g_gen_cache.G_vec[i],
+                                            (const unsigned char *)"G", 1,
+                                            (uint32_t)i))
+        return 0;
+    }
+    g_gen_cache.G_cached = n;
+  }
+
+  /* Expand H vector if needed */
+  if (g_gen_cache.H_cached < n)
+  {
+    secp256k1_pubkey *new_H = (secp256k1_pubkey *)realloc(
+        g_gen_cache.H_vec, n * sizeof(secp256k1_pubkey));
+    if (!new_H)
+      return 0;
+    g_gen_cache.H_vec = new_H;
+
+    for (size_t i = g_gen_cache.H_cached; i < n; i++)
+    {
+      /* Note: H vector for Bulletproofs uses "H" label with index starting at 1
+       * to distinguish from the single H generator at index 0 */
+      if (!secp256k1_mpt_hash_to_point_nums(ctx, &g_gen_cache.H_vec[i],
+                                            (const unsigned char *)"H", 1,
+                                            (uint32_t)(i + 1)))
+        return 0;
+    }
+    g_gen_cache.H_cached = n;
+  }
+
+  g_gen_cache.initialized = 1;
+  return 1;
+}
+
+/**
+ * @brief Get cached G vector generators.
+ *
+ * Returns a pointer to the cached generators (do not free).
+ * Automatically expands cache if needed.
+ *
+ * @param ctx    secp256k1 context
+ * @param n      Number of generators needed
+ * @return Pointer to G_vec or NULL on failure
+ */
+const secp256k1_pubkey *secp256k1_mpt_get_cached_G_vec(
+    const secp256k1_context *ctx, size_t n)
+{
+  if (!ensure_generator_cache(ctx, n))
+    return NULL;
+  return g_gen_cache.G_vec;
+}
+
+/**
+ * @brief Get cached H vector generators.
+ */
+const secp256k1_pubkey *secp256k1_mpt_get_cached_H_vec(
+    const secp256k1_context *ctx, size_t n)
+{
+  if (!ensure_generator_cache(ctx, n))
+    return NULL;
+  return g_gen_cache.H_vec;
+}
+
+/**
+ * @brief Get the cached single H generator (for Pedersen commitments).
+ */
+int secp256k1_mpt_get_cached_h_generator(const secp256k1_context *ctx,
+                                         secp256k1_pubkey *h)
+{
+  if (!ensure_generator_cache(ctx, 0))
+    return 0;
+  *h = g_gen_cache.H_single;
+  return 1;
+}
+
+/**
+ * @brief Free all cached generators.
+ *
+ * Call this during shutdown to release memory.
+ */
+void secp256k1_mpt_free_generator_cache(void)
+{
+  free(g_gen_cache.G_vec);
+  free(g_gen_cache.H_vec);
+  g_gen_cache.G_vec = NULL;
+  g_gen_cache.H_vec = NULL;
+  g_gen_cache.G_cached = 0;
+  g_gen_cache.H_cached = 0;
+  g_gen_cache.H_single_valid = 0;
+  g_gen_cache.initialized = 0;
+}
 
 /* --- Internal Helpers --- */
 
