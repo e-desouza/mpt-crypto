@@ -12,6 +12,7 @@ The library is built on top of `libsecp256k1` for elliptic curve arithmetic and 
 
 - **Additive Homomorphic Encryption:** Enables the ledger to aggregate encrypted balances (e.g., `Enc(A) + Enc(B) = Enc(A+B)`) without decryption.
 - **Canonical Zero:** Deterministic encryption of zero balances to prevent ledger state bloat and ensure consistency.
+- **Constant-Time Decryption (BSGS):** Uses Baby-Step Giant-Step algorithm for O(√n) decryption with fixed execution time, providing defense in depth against timing side-channels.
 
 ### 2. Range Proofs (Bulletproofs)
 
@@ -22,8 +23,41 @@ The library is built on top of `libsecp256k1` for elliptic curve arithmetic and 
 ### 3. Zero-Knowledge Proofs (Sigma Protocols)
 
 - **Plaintext Equality:** Proves two or more ciphertexts encrypt the same amount under different keys.
+- **Batch Verification:** Efficiently verify multiple same-plaintext proofs in a single API call.
 - **Linkage Proof:** Proves consistency between an ElGamal ciphertext (used for transfer) and a Pedersen Commitment (used for the range proof).
 - **Proof of Knowledge (PoK):** Proves ownership of the secret key during account registration to prevent rogue key attacks.
+
+### 4. Performance Optimizations
+
+- **Generator Cache:** Lazy-initialized cache for NUMS (Nothing-Up-My-Sleeve) generators, avoiding repeated hash-to-curve operations during proof generation/verification.
+- **Batch Scalar Inversion:** Montgomery's trick for computing multiple modular inverses with a single inversion operation, providing 3-13x speedup for IPA computations.
+
+## Security Considerations
+
+### Constant-Time Decryption (Defense in Depth)
+
+ElGamal decryption requires solving the discrete logarithm problem (DLP) for small values. A naive brute-force search leaks the encrypted amount through timing: decrypting amount=100 is faster than amount=1,000,000.
+
+While decryption typically occurs client-side in trusted environments, this library implements **Baby-Step Giant-Step (BSGS)** as a defense-in-depth measure:
+
+- **Fixed iteration count:** Always performs the same number of operations regardless of the encrypted value
+- **Constant-time lookups:** Hash table operations use constant-time comparison to prevent cache-timing attacks
+- **O(√n) complexity:** ~1000 iterations for amounts up to 1,000,000 (vs 1,000,000 for brute-force)
+
+```c
+// Initialize BSGS table once at startup (~80KB, ~4ms)
+secp256k1_elgamal_bsgs_init(ctx);
+
+// Decryption now runs in constant time (~30ms regardless of amount)
+secp256k1_elgamal_decrypt(ctx, &amount, c1, c2, privkey);
+
+// Cleanup at shutdown
+secp256k1_elgamal_bsgs_free();
+```
+
+### Memory Cleanup
+
+All secret scalars are securely wiped using `OPENSSL_cleanse()` after use.
 
 ## Building and Testing
 
@@ -114,3 +148,48 @@ The following tests should pass:
 - `test_same_plaintext_multi_shared_r` - Shared randomness variant
 
 **Note:** `test_bulletproof.c` is excluded from the build because the aggregated implementation (bulletproof_aggregated.c) is fully general; verifying the m=1 case is now covered by test_bulletproof_agg.c.
+
+## API Reference
+
+### ElGamal Encryption
+
+| Function | Description |
+|----------|-------------|
+| `secp256k1_elgamal_generate_keypair()` | Generate a new key pair |
+| `secp256k1_elgamal_encrypt()` | Encrypt an amount |
+| `secp256k1_elgamal_decrypt()` | Decrypt a ciphertext (constant-time with BSGS) |
+| `secp256k1_elgamal_add()` | Homomorphically add two ciphertexts |
+| `secp256k1_elgamal_subtract()` | Homomorphically subtract two ciphertexts |
+| `secp256k1_elgamal_bsgs_init()` | Initialize BSGS lookup table (~80KB) |
+| `secp256k1_elgamal_bsgs_free()` | Free BSGS table memory |
+
+### Generator Cache
+
+| Function | Description |
+|----------|-------------|
+| `secp256k1_mpt_get_cached_G_vec()` | Get cached G vector generators for Bulletproofs |
+| `secp256k1_mpt_get_cached_H_vec()` | Get cached H vector generators for Bulletproofs |
+| `secp256k1_mpt_get_cached_h_generator()` | Get cached single H generator for Pedersen |
+| `secp256k1_mpt_free_generator_cache()` | Free all cached generators |
+
+### Scalar Operations
+
+| Function | Description |
+|----------|-------------|
+| `secp256k1_mpt_scalar_add()` | Add two scalars mod n |
+| `secp256k1_mpt_scalar_mul()` | Multiply two scalars mod n |
+| `secp256k1_mpt_scalar_inverse()` | Compute modular inverse |
+| `secp256k1_mpt_scalar_batch_inverse()` | Batch inversion using Montgomery's trick |
+| `secp256k1_mpt_scalar_negate()` | Negate a scalar mod n |
+
+### Zero-Knowledge Proofs
+
+| Function | Description |
+|----------|-------------|
+| `secp256k1_mpt_prove_same_plaintext()` | Prove two ciphertexts encrypt the same value |
+| `secp256k1_mpt_verify_same_plaintext()` | Verify same-plaintext proof |
+| `secp256k1_mpt_batch_verify_same_plaintext()` | Batch verify multiple proofs |
+| `secp256k1_elgamal_pedersen_link_prove()` | Prove ElGamal-Pedersen linkage |
+| `secp256k1_elgamal_pedersen_link_verify()` | Verify linkage proof |
+| `secp256k1_mpt_pok_sk_prove()` | Prove knowledge of secret key |
+| `secp256k1_mpt_pok_sk_verify()` | Verify PoK proof |
