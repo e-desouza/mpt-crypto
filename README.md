@@ -32,6 +32,8 @@ The library is built on top of `libsecp256k1` for elliptic curve arithmetic and 
 - **Generator Cache:** Lazy-initialized cache for NUMS (Nothing-Up-My-Sleeve) generators, avoiding repeated hash-to-curve operations during proof generation/verification.
 - **Batch Scalar Inversion:** Montgomery's trick for computing multiple modular inverses with a single inversion operation, providing 3-13x speedup for IPA computations.
 
+See [docs/PERF.md](docs/PERF.md) for detailed benchmarks.
+
 ## Security Considerations
 
 ### Constant-Time Decryption (Defense in Depth)
