@@ -50,6 +50,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * FUTURE OPTIMIZATION: secp256k1's internal ecmult_multi_var
+ *
+ * secp256k1 has an internal multi-scalar multiplication function
+ * (secp256k1_ecmult_multi_var) that uses Pippenger/Strauss algorithms
+ * for O(n/log(n)) complexity. However, integrating it requires:
+ *
+ * 1. Access to internal secp256k1 types (secp256k1_gej, secp256k1_scalar, etc.)
+ * 2. Linking with the full secp256k1 implementation (not just the library)
+ * 3. Including secp256k1.c which pulls in all static implementations
+ *
+ * For now, we use the naive O(n) MSM which is competitive for n <= 512
+ * due to secp256k1's highly optimized scalar multiplication.
+ *
+ * To enable internal MSM in the future, one approach is to:
+ * - Build mpt-crypto as part of a secp256k1 module
+ * - Or use secp256k1-zkp which may expose multi-exponentiation
+ */
+
 /* Bit-size of each value proved in range */
 #define BP_VALUE_BITS 64
 
@@ -184,22 +203,27 @@ int secp256k1_bulletproof_add_point_to_accumulator(const secp256k1_context *ctx,
   return 1;
 }
 /**
- * Computes Multiscalar Multiplication (MSM): R = sum(s[i] * P[i]).
- * ctx       The context.
- * r_out     Output point (the sum R).
- * points    Array of N input points (secp256k1_pubkey).
- * scalars   Flat array of N 32-byte scalars.
- * n         The number of terms (N).
- * return    1 on success, 0 on failure.
- * NOTE: This MSM is used only for Bulletproofs where all scalars are public.
- * It is NOT constant-time with respect to scalars and MUST NOT be used
- * for secret-key operations.
+ * @brief Multi-Scalar Multiplication (MSM) for Bulletproofs.
+ *
+ * Computes: r_out = sum_i(scalars[i] * points[i])
+ *
+ * Uses the naive approach: n individual scalar multiplications followed by
+ * point additions. For typical Bulletproof sizes (n <= 512), this is competitive
+ * with more complex algorithms like Pippenger due to secp256k1's highly optimized
+ * scalar multiplication.
+ *
+ * NOTE: This is NOT constant-time and is only for public verification.
+ *
+ * @return 1 on success, 0 on failure (all scalars zero or invalid input).
  */
 int secp256k1_bulletproof_ipa_msm(const secp256k1_context *ctx,
                                   secp256k1_pubkey *r_out,
                                   const secp256k1_pubkey *points,
                                   const unsigned char *scalars, size_t n)
 {
+  if (n == 0)
+    return 0;
+
   secp256k1_pubkey acc;
   memset(&acc, 0, sizeof(acc));
   int initialized = 0;
@@ -218,7 +242,7 @@ int secp256k1_bulletproof_ipa_msm(const secp256k1_context *ctx,
       return 0;
   }
 
-  /* All scalars zero → result is infinity (not representable here) */
+  /* All scalars zero → result is infinity (not representable) */
   if (!initialized)
     return 0;
 
@@ -930,20 +954,29 @@ static int ipa_verify_explicit(
   unsigned char last[32];
   memcpy(last, ipa_transcript_id, 32);
 
-  /* ---- 1. Re-derive u_i ---- */
+  /* ---- 1. Re-derive u_i (all rounds) ---- */
   for (size_t i = 0; i < rounds; i++)
   {
     unsigned char *ui = u_flat + 32 * i;
-    unsigned char *uiinv = uinv_flat + 32 * i;
 
     if (!derive_ipa_round_challenge(ctx, ui, last, &L_vec[i], &R_vec[i]))
       goto cleanup;
 
-    secp256k1_mpt_scalar_inverse(uiinv, ui);
-    if (!secp256k1_ec_seckey_verify(ctx, uiinv))
-      goto cleanup;
-
     memcpy(last, ui, 32);
+  }
+
+  /* ---- 1b. Batch-invert all u_i in one shot ---- */
+  if (!secp256k1_mpt_scalar_batch_inverse(
+          (unsigned char (*)[32])uinv_flat,
+          (const unsigned char (*)[32])u_flat,
+          rounds))
+    goto cleanup;
+
+  /* Verify all inverses are valid scalars */
+  for (size_t i = 0; i < rounds; i++)
+  {
+    if (!secp256k1_ec_seckey_verify(ctx, uinv_flat + 32 * i))
+      goto cleanup;
   }
 
   /* ---- 2. Fold generators ---- */
